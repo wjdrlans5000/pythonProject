@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 from backtesting import Backtest, Strategy
+from backtesting.backtesting import Trade
 
 
 # ----------------------------
@@ -75,9 +76,12 @@ def compute_ma_slope(df, window=20):
 class MultiIndicatorStrategy(Strategy):
     window_days = 20
     adx_threshold = 20
-    size_pct = 2.0
+    size_pct = 1.0
 
     def init(self):
+        # 백테스트용 전체 df에서 마지막날 기록
+        self._last_day = self.data.index[-1]
+
         # 가격/지표(데이터프레임에 이미 계산되어 있어야 함)
         self.close    = self.I(lambda x: x, self.data.Close)
         self.macd     = self.I(lambda x: x, self.data.MACD)
@@ -162,7 +166,8 @@ class MultiIndicatorStrategy(Strategy):
             # 즉시 조건 체크
             try:
                 if (macd_now < 0) and (self.macd[i1] >= 0) and self.is_uptrend(i0):
-                    self.sell()
+                    # self.sell() # 얘는 매도와 동시에 숏포지션 잡음
+                    self.position.close() # 얘는 청산만
                     self.trade_logs.append(('SELL', 'MACD0_DOWN', self.data.index[-1], self.close[-1]))
                     self.pending_sell = None
                     return
@@ -170,12 +175,12 @@ class MultiIndicatorStrategy(Strategy):
                 pass
             try:
                 if (self.close[i1] >= self.bb_mid[i1]) and (self.close[i0] < self.bb_mid[i0]):
-                    self.sell()
+                    self.position.close()
                     self.trade_logs.append(('SELL', 'BB_DOWN', self.data.index[-1], self.close[-1]))
                     self.pending_sell = None
                     return
                 if self.rsi[i0] > 72:
-                    self.sell()
+                    self.position.close()
                     self.trade_logs.append(('SELL', 'RSI_OVER', self.data.index[-1], self.close[-1]))
                     self.pending_sell = None
                     return
@@ -232,23 +237,23 @@ class MultiIndicatorStrategy(Strategy):
             try:
                 if self.is_uptrend(i0):
                     if (self.macd[i0] < 0) and (self.macd[i1] >= 0):
-                        self.sell()
+                        self.position.close()
                         self.trade_logs.append(('SELL', 'MACD0_pending', self.data.index[-1], self.close[-1]))
                         self.pending_sell = None
                         return
                 else:
                     if (self.macd[i0] < 0) and (self.macd[i1] >= 0):
-                        self.sell()
+                        self.position.close()
                         self.trade_logs.append(('SELL', 'MACD0_pending', self.data.index[-1], self.close[-1]))
                         self.pending_sell = None
                         return
                     if (self.close[i1] >= self.bb_mid[i1]) and (self.close[i0] < self.bb_mid[i0]):
-                        self.sell()
+                        self.position.close()
                         self.trade_logs.append(('SELL', 'BB_pending', self.data.index[-1], self.close[-1]))
                         self.pending_sell = None
                         return
                     if self.rsi[i0] > 72:
-                        self.sell()
+                        self.position.close()
                         self.trade_logs.append(('SELL', 'RSI_pending', self.data.index[-1], self.close[-1]))
                         self.pending_sell = None
                         return
@@ -257,6 +262,12 @@ class MultiIndicatorStrategy(Strategy):
             if self.pending_sell['remaining'] <= 0:
                 self.pending_sell = None
 
+        # 마지막날 강제 청산 (오늘 남아 있는 포지션만)
+        if self.data.index[i0] == self._last_day:
+            if self.position and self.position.is_long:
+                self.position.close()
+                self.trade_logs.append(('SELL', 'FINAL_CLOSE', self.data.index[i0], self.close[i0]))
+                return
 
 # ----------------------------
 # 실행: yfinance → 지표 계산 → backtest
@@ -291,6 +302,8 @@ if __name__ == "__main__":
 
     bt = Backtest(df, MultiIndicatorStrategy, cash=10000, commission=0.0005, exclusive_orders=True, finalize_trades=True)
     stats = bt.run()
+
     print(stats)
     print("\n".join(str(log) for log in stats._strategy.trade_logs))
     bt.plot()
+
