@@ -79,6 +79,7 @@ class MultiIndicatorStrategy(Strategy):
     size_pct = 1.0
 
     def init(self):
+        # int(self.equity / self.data.Close[-1]) # cash 내 구매가능 수량
         # 백테스트용 전체 df에서 마지막날 기록
         self._last_day = self.data.index[-1]
 
@@ -265,6 +266,7 @@ class MultiIndicatorStrategy(Strategy):
         # 마지막날 강제 청산 (오늘 남아 있는 포지션만)
         if self.data.index[i0] == self._last_day:
             if self.position and self.position.is_long:
+
                 self.position.close()
                 self.trade_logs.append(('SELL', 'FINAL_CLOSE', self.data.index[i0], self.close[i0]))
                 return
@@ -300,9 +302,11 @@ if __name__ == "__main__":
     df = df.dropna().copy()
     print(df.head())
 
-    bt = Backtest(df, MultiIndicatorStrategy, cash=10000, commission=0.0005, exclusive_orders=True, finalize_trades=True)
+    bt = Backtest(df, MultiIndicatorStrategy, cash=261, commission=0.0005, exclusive_orders=True, finalize_trades=True)
     stats = bt.run()
 
+    # Equity, Return 등은 원금 cash 대비 총 자산 및 수익률을 의미
+    # 현재 무조건 1주만 매수하기 때문에 cash 높으면 Equity나 Return 작음
     print(stats)
     print("\n".join(str(log) for log in stats._strategy.trade_logs))
     bt.plot()
