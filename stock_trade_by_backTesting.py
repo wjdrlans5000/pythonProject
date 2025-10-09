@@ -1,9 +1,46 @@
 # backtesting_1002_fixed.py
 import pandas as pd
-import numpy as np
 import yfinance as yf
 from backtesting import Backtest, Strategy
-from backtesting.backtesting import Trade
+import requests
+import datetime
+import os
+
+
+def load_telegram_config(config_path="telegram_config.txt"):
+    """
+    같은 경로의 telegram_config.txt 파일에서 BOT_TOKEN과 CHAT_ID를 읽어옴
+    """
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"⚠️ 설정 파일을 찾을 수 없습니다: {config_path}")
+
+    bot_token = None
+    chat_id = None
+
+    with open(config_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):  # 주석이나 공백 무시
+                continue
+            if line.startswith("BOT_TOKEN="):
+                bot_token = line.split("=", 1)[1].strip()
+            elif line.startswith("CHAT_ID="):
+                chat_id = line.split("=", 1)[1].strip()
+
+    if not bot_token or not chat_id:
+        raise ValueError("⚠️ 설정 파일에 BOT_TOKEN 또는 CHAT_ID가 없습니다.")
+
+    return bot_token, chat_id
+
+# 텔레그램 전송 함수
+def send_telegram_message(bot_token, chat_id, text):
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {
+        "chat_id": chat_id,
+        "text": text
+    }
+    response = requests.post(url, data=payload)
+    return response.json()
 
 
 # ----------------------------
@@ -138,23 +175,27 @@ class MultiIndicatorStrategy(Strategy):
         # 매수 신호: MACD 골든 크로스 감지 -> pending_buy 설정
         if (not self.position or self.position.is_short) and (macd_prev <= sig_prev) and (macd_now > sig_now):
             self.pending_buy = {'remaining': self.window_days, 'reason_signal': 'MACD골든크로스'}
-            print({'self.pending_buy': self.pending_buy
-                      ,'당일종가' : self.close[i0]
-                      ,'time': self.data.index[-1]})
+            # print({'self.pending_buy': self.pending_buy
+            #           ,'당일종가' : self.close[i0]
+            #           ,'time': self.data.index[-1]})
             # 즉시 동일일 진입 가능성 체크 (MACD 0 돌파 or BB 돌파)
             try:
                 if (macd_now >= 0)  and self.is_uptrend(i0):
-                    self.buy(size=self.size_pct)
-                    self.trade_logs.append(('BUY', 'MACD0', self.data.index[-1], self.close[-1]))
-                    self.pending_buy = None
+                    size = int(self.equity / self.data.Close[-1])
+                    if size > 0:
+                        self.buy(size=size)
+                        self.trade_logs.append(('BUY', 'MACD0', self.data.index[-1], self.close[-1]))
+                        self.pending_buy = None
                     return
             except Exception:
                 pass
             try:
                 if (self.close[i0] > self.bb_mid[i0]) and (self.close[i1] <= self.bb_mid[i1]) and (not self.is_downtrend(i0)):
-                    self.buy(size=self.size_pct)
-                    self.trade_logs.append(('BUY', 'BB_UP', self.data.index[-1], self.close[-1]))
-                    self.pending_buy = None
+                    size = int(self.equity / self.data.Close[-1])
+                    if size > 0:
+                        self.buy(size=size)
+                        self.trade_logs.append(('BUY', 'BB_UP', self.data.index[-1], self.close[-1]))
+                        self.pending_buy = None
                     return
             except Exception:
                 pass
@@ -162,8 +203,8 @@ class MultiIndicatorStrategy(Strategy):
         # 매도 신호: MACD 데드크로스 감지 -> pending_sell 설정
         if self.position.is_long and (macd_prev >= sig_prev) and (macd_now < sig_now):
             self.pending_sell = {'remaining': self.window_days, 'reason_signal': 'MACD데드크로스'}
-            print({'self.pending_sell': self.pending_sell
-                      ,'time': self.data.index[-1]})
+            # print({'self.pending_sell': self.pending_sell
+            #           ,'time': self.data.index[-1]})
             # 즉시 조건 체크
             try:
                 if (macd_now < 0) and (self.macd[i1] >= 0) and self.is_uptrend(i0):
@@ -194,30 +235,36 @@ class MultiIndicatorStrategy(Strategy):
         # 조건(예: MACD 0선 돌파, BB 상향 돌파, RSI 저점 반등 등)이 나오면 매수 체결.
         if self.pending_buy is not None:
             self.pending_buy['remaining'] -= 1
-            print({'self.remaining': self.pending_buy['remaining']
-                      ,'is_uptrend(i0)':self.is_uptrend(i0)
-                      ,'is_downtrend(i0)':self.is_downtrend(i0)
-                      ,'당일.macd[i0]': self.macd[i0]
-                      ,'전일.macd[i1]': self.macd[i1]
-                      ,'당일종가' : self.close[i0]
-                      ,'당일 BB_MID' : self.bb_mid[i0]
-                      ,'time': self.data.index[i0]
-                   })
+            # print({'self.remaining': self.pending_buy['remaining']
+            #           ,'is_uptrend(i0)':self.is_uptrend(i0)
+            #           ,'is_downtrend(i0)':self.is_downtrend(i0)
+            #           ,'당일.macd[i0]': self.macd[i0]
+            #           ,'전일.macd[i1]': self.macd[i1]
+            #           ,'당일종가' : self.close[i0]
+            #           ,'당일 BB_MID' : self.bb_mid[i0]
+            #           ,'time': self.data.index[i0]
+            #        })
             try:
                 if (self.macd[i0] >= 0) and (self.macd[i1] < 0) and self.is_uptrend(i0):
-                    self.buy(size=self.size_pct)
-                    self.trade_logs.append(('BUY', 'MACD0_pending', self.data.index[-1], self.close[-1]))
-                    self.pending_buy = None
+                    size = int(self.equity / self.data.Close[-1])
+                    if size > 0:
+                        self.buy(size=size)
+                        self.trade_logs.append(('BUY', 'MACD0_pending', self.data.index[-1], self.close[-1]))
+                        self.pending_buy = None
                     return
                 if (self.close[i0] > self.bb_mid[i0]) and (self.close[i1] <= self.bb_mid[i1]) and (not self.is_downtrend(i0)):
-                    self.buy(size=self.size_pct)
-                    self.trade_logs.append(('BUY', 'BB_pending', self.data.index[-1], self.close[-1]))
-                    self.pending_buy = None
+                    size = int(self.equity / self.data.Close[-1])
+                    if size > 0:
+                        self.buy(size=size)
+                        self.trade_logs.append(('BUY', 'BB_pending', self.data.index[-1], self.close[-1]))
+                        self.pending_buy = None
                     return
                 if (self.rsi[i0] < 30) and (not self.is_uptrend(i0)) and (not self.is_downtrend(i0)):
-                    self.buy(size=self.size_pct)
-                    self.trade_logs.append(('BUY', 'RSI_box_pending', self.data.index[-1], self.close[-1]))
-                    self.pending_buy = None
+                    size = int(self.equity / self.data.Close[-1])
+                    if size > 0:
+                        self.buy(size=size)
+                        self.trade_logs.append(('BUY', 'RSI_box_pending', self.data.index[-1], self.close[-1]))
+                        self.pending_buy = None
                     return
             except Exception:
                 pass
@@ -227,14 +274,14 @@ class MultiIndicatorStrategy(Strategy):
         # pending_sell 체크
         if self.pending_sell is not None:
             self.pending_sell['remaining'] -= 1
-            print({'self.remaining': self.pending_sell['remaining']
-                      ,'is_uptrend(i0)':self.is_uptrend(i0)
-                      ,'당일.macd[i0]': self.macd[i0]
-                      ,'전일.macd[i1]': self.macd[i1]
-                      ,'당일종가' : self.close[i0]
-                      ,'당일 BB_MID' : self.bb_mid[i0]
-                      ,'time': self.data.index[i0]
-                   })
+            # print({'self.remaining': self.pending_sell['remaining']
+            #           ,'is_uptrend(i0)':self.is_uptrend(i0)
+            #           ,'당일.macd[i0]': self.macd[i0]
+            #           ,'전일.macd[i1]': self.macd[i1]
+            #           ,'당일종가' : self.close[i0]
+            #           ,'당일 BB_MID' : self.bb_mid[i0]
+            #           ,'time': self.data.index[i0]
+            #        })
             try:
                 if self.is_uptrend(i0):
                     if (self.macd[i0] < 0) and (self.macd[i1] >= 0):
@@ -268,46 +315,104 @@ class MultiIndicatorStrategy(Strategy):
             if self.position and self.position.is_long:
 
                 self.position.close()
-                self.trade_logs.append(('SELL', 'FINAL_CLOSE', self.data.index[i0], self.close[i0]))
+                self.trade_logs.append(('FINAL_CLOSE', 'FINAL_CLOSE', self.data.index[i0], self.close[i0]))
                 return
 
 # ----------------------------
 # 실행: yfinance → 지표 계산 → backtest
 # ----------------------------
 if __name__ == "__main__":
-    symbol = "TSLA"
+    BOT_TOKEN, CHAT_ID = load_telegram_config()
+    symbols = [
+        "TSLA", "TEM", "NVDA", "ORCL", "QQQ", "SPY", "FIG", "MSFT", "META", "AMZN", "GOOGL", "TSM", "AAPL", "IONQ", "AVGO"
+    ]
+    # symbol = "TSLA"
     # symbol = "005930.KS"
-    start = "2024-01-01"   # 실제 분석 시작보다 최소 2달 앞
-    end   = "2025-10-03"
+    start = "2023-01-01"   # 실제 분석 시작보다 최소 2달 앞
+    end   = datetime.datetime.today().strftime("%Y-%m-%d")
 
-    df = yf.download(symbol, start=start, end=end, group_by="column", auto_adjust=False)
-    df.columns = df.columns.droplevel(1)
+    results = []  # 전체 결과 저장용
 
-    # backtesting이 기대하는 컬럼명 보장
-    df = df.rename(columns={'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'})
-    df = df.dropna().copy()
-    print(df.head())
+    for symbol in symbols:
+        print(f"\n📈 === {symbol} 백테스트 시작 ===")
 
-    # === 여기서 지표를 전체 DF 기준으로 먼저 계산 ===
-    # MACD + Bollinger 계산
-    df = compute_macd(df, short=12, long=26, signal=9)
-    df = compute_bollinger(df, window=20, num_std=2)
-    df = compute_rsi(df, window=14)
-    df = compute_adx(df, window=14)
-    df = compute_ma_slope(df, window=20)
+        # 데이터 다운로드
+        df = yf.download(symbol, start=start, end=end, group_by="column", auto_adjust=False)
+        df.columns = df.columns.droplevel(1)
 
-    # 이제 실제 백테스트 구간만 잘라냄
-    df = df.loc["2024-10-02":].copy()
+        # backtesting이 기대하는 컬럼명 보장
+        df = df.rename(columns={'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'})
+        df = df.dropna().copy()
 
-    df = df.dropna().copy()
-    print(df.head())
+        # === 여기서 지표를 전체 DF 기준으로 먼저 계산 ===
+        # MACD + Bollinger 계산
+        df = compute_macd(df, short=12, long=26, signal=9)
+        df = compute_bollinger(df, window=20, num_std=2)
+        df = compute_rsi(df, window=14)
+        df = compute_adx(df, window=14)
+        df = compute_ma_slope(df, window=20)
 
-    bt = Backtest(df, MultiIndicatorStrategy, cash=261, commission=0.0005, exclusive_orders=True, finalize_trades=True)
-    stats = bt.run()
+        # 실제 테스트 구간 (지표 안정화 이후)
+        df = df.loc["2023-10-02":].dropna().copy()
+        print(df.head())
 
-    # Equity, Return 등은 원금 cash 대비 총 자산 및 수익률을 의미
-    # 현재 무조건 1주만 매수하기 때문에 cash 높으면 Equity나 Return 작음
-    print(stats)
-    print("\n".join(str(log) for log in stats._strategy.trade_logs))
-    bt.plot()
+        # 백테스트 실행
+        bt = Backtest(df, MultiIndicatorStrategy, cash=1000, commission=0,
+                      exclusive_orders=True, finalize_trades=True, trade_on_close=True)
+        stats = bt.run()
+
+        # BUY/SELL/FINAL_CLOSE 구분용
+        logs = getattr(stats._strategy, "trade_logs", [])
+        trade_df = pd.DataFrame(logs, columns=["Signal", "Reason", "Date", "Price"]) if logs else pd.DataFrame()
+        if not trade_df.empty:
+            real_trades = trade_df[trade_df["Signal"].isin(["BUY", "SELL"])].shape[0]
+            has_final_close = "FINAL_CLOSE" in trade_df["Signal"].values
+            last_log = trade_df.iloc[-1].to_dict()
+            last_log_str = f"{last_log['Signal']} ({last_log['Reason']}) @ {last_log['Date'].strftime('%Y-%m-%d')} ${round(float(last_log['Price']),2)}"
+        else:
+            real_trades = 0
+            has_final_close = False
+            last_log_str = "None"
+
+
+        # 결과 요약 저장
+        result = {
+            "Symbol": symbol,
+            "Start": df.index[0].strftime("%Y-%m-%d"),
+            "End": df.index[-1].strftime("%Y-%m-%d"),
+            "Final Equity": round(stats["Equity Final [$]"], 2),
+            "Return [%]": round(stats["Return [%]"], 2),
+            "Buy & Hold Return [%]": round(stats["Buy & Hold Return [%]"], 2),
+            "Win Rate [%]": round(stats["Win Rate [%]"], 2),
+            "Trades": int(stats["# Trades"]),
+            "Best Trade [%]": round(stats["Best Trade [%]"], 2),
+            "Worst Trade [%]": round(stats["Worst Trade [%]"], 2),
+            "Has FINAL_CLOSE": has_final_close,
+            "Last Signal Log": last_log_str
+        }
+
+        results.append(result)
+
+        # Equity, Return 등은 원금 cash 대비 총 자산 및 수익률을 의미
+        print(stats)
+        print("\n".join(str(log) for log in getattr(stats._strategy, "trade_logs", [])))
+        # bt.plot()
+
+        # 신호발생 종목 텔레그램 알람추가
+        if not has_final_close and last_log['Date'].strftime('%Y-%m-%d') >= (datetime.datetime.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d") :
+            report_text = (
+                "=====================\n"
+                f"📊 종목명: {symbol}\n"
+                f"💰 수익률: {round(stats["Return [%]"], 2):,}\n"
+                f"📌 마지막신호: {last_log_str}\n"
+            )
+            send_telegram_message(BOT_TOKEN, CHAT_ID, report_text)
+
+    # ====== 결과 요약표 ======
+    summary_df = pd.DataFrame(results)
+    print("\n📊 전체 종목 결과 요약:")
+    print(summary_df.to_string(index=False))
+
+
+
 
