@@ -389,6 +389,83 @@ class MultiIndicatorStrategy(Strategy):
                 self.trade_logs.append(('FINAL_CLOSE', 'FINAL_CLOSE', self.data.index[i0], self.close[i0]))
                 return
 
+
+
+def backtest_stock(symbol):
+    BOT_TOKEN, CHAT_ID = load_telegram_config()
+    start = "2023-01-01"   # 실제 분석 시작보다 최소 2달 앞
+    end   = datetime.datetime.today().strftime("%Y-%m-%d")
+
+    print(f"\n📈 === {symbol} 백테스트 시작 ===")
+
+    # 데이터 다운로드
+    df = yf.download(symbol, start=start, end=end, group_by="column", auto_adjust=False)
+    df.columns = df.columns.droplevel(1)
+
+    # backtesting이 기대하는 컬럼명 보장
+    df = df.rename(columns={'Open': 'Open', 'High': 'High', 'Low': 'Low', 'Close': 'Close', 'Volume': 'Volume'})
+    df = df.dropna().copy()
+
+    # === 여기서 지표를 전체 DF 기준으로 먼저 계산 ===
+    # MACD + Bollinger 계산
+    df = compute_macd(df, short=12, long=26, signal=9)
+    df = compute_bollinger(df, window=20, num_std=2)
+    df = compute_rsi(df, window=14)
+    df = compute_adx(df, window=14)
+    df = compute_ma_slope(df, window=20)
+
+    # 실제 테스트 구간 (지표 안정화 이후)
+    df = df.loc["2023-10-02":].dropna().copy()
+    print(df.head())
+
+    # 백테스트 실행
+    bt = Backtest(df, MultiIndicatorStrategy, cash=1000000, commission=0,
+                  exclusive_orders=True, finalize_trades=True, trade_on_close=True)
+    stats = bt.run()
+    print(stats)
+    # BUY/SELL/FINAL_CLOSE 구분용
+    logs = getattr(stats._strategy, "trade_logs", [])
+    trade_df = pd.DataFrame(logs, columns=["Signal", "Reason", "Date", "Price"]) if logs else pd.DataFrame()
+    if not trade_df.empty:
+        last_log = trade_df.iloc[-1].to_dict()
+        last_log_str = f"{last_log['Signal']} ({last_log['Reason']}) @ {last_log['Date'].strftime('%Y-%m-%d')} ${round(float(last_log['Price']),2)}"
+    else:
+        last_log_str = "None"
+
+    # 종목 텔레그램 알람추가
+    report_text = (
+        "=====================\n"
+        f"📊 종목명: {symbol}\n"
+        f"💰 수익률: {round(stats["Return [%]"], 2):,}\n"
+        f"📌 Buy & Hold: {round(stats["Buy & Hold Return [%]"], 2):,}\n"
+        f"📈 마지막신호: {last_log_str}\n"
+    )
+    # === 📉 차트 생성 ===
+    plt.figure(figsize=(10, 5))
+    plt.plot(df['Close'], label='Close', color='black', linewidth=1.2)
+    plt.title(f"{symbol} ({symbol}) - 최근 주가 및 신호")
+    plt.xlabel("Date")
+    plt.ylabel("Price ($)")
+    plt.grid(True, linestyle="--", alpha=0.5)
+    # BUY / SELL 신호 표시
+    if not trade_df.empty:
+        buy_dates = trade_df[trade_df["Signal"] == "BUY"]["Date"]
+        sell_dates = trade_df[trade_df["Signal"] == "SELL"]["Date"]
+        plt.scatter(buy_dates, df.loc[buy_dates, "Close"], color="green", label="BUY", marker="^", s=80)
+        plt.scatter(sell_dates, df.loc[sell_dates, "Close"], color="red", label="SELL", marker="v", s=80)
+    plt.legend()
+    plt.rcParams['font.family'] = 'Malgun Gothic'
+    plt.rcParams['axes.unicode_minus'] = False
+    # 메모리 버퍼에 저장 (파일 안 만들고 바로 텔레그램 전송용)
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight')
+    buf.seek(0)
+    plt.close()
+    send_telegram_message(BOT_TOKEN, CHAT_ID, report_text, photo=buf)
+    buf.close()
+
+    # return report_text
+
 # ----------------------------
 # 실행: yfinance → 지표 계산 → backtest
 # ----------------------------
