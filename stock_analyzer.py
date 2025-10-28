@@ -3,149 +3,251 @@ import requests
 import yfinance as yf
 from yahooquery import search as yq_search
 import pandas as pd
+import datetime
 from typing import Optional
 from urllib.parse import quote
 import json
 
 class StockAnalyzer:
-    def __init__(self):
-        pass
+    def __init__(self, user_agent: str = None):
+        self.user_agent = user_agent or (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.66 Safari/537.36"
+        )
 
-    def format_market_cap(self, cap: Optional[float]) -> str:
-        """시가총액을 읽기 쉬운 문자열로 변환 (C 스타일: 억/조 단위)."""
-        if not cap or cap <= 0:
+    # ---------- formatting helpers ----------
+    def format_price(self, value, ticker: str) -> str:
+        if value is None:
             return "N/A"
-        trillion = 1_000_000_000_000
-        billion = 1_000_000_000
-        million = 1_000_000
-        if cap >= trillion:
-            # 조 단위 (trillion)
-            return f"${cap / trillion:.1f}조 달러"
-        elif cap >= billion:
-            # 억 단위: 1 billion = 10억 -> 하지만 요청하신 표현은 억 달러 단위 (1e8)
-            # 여기서는 '억 달러'로 보여주기 위해 1e8으로 나눔 (사용자 원문 스타일 유지)
-            return f"${cap / 1e8:,.1f}억 달러"
-        elif cap >= million:
-            return f"${cap / million:.1f}백만 달러"
-        else:
-            return f"${cap:,.0f}"
+        try:
+            if ticker.endswith(".KS") or ticker.endswith(".KQ"):
+                return f"₩{value:,.0f}"
+            else:
+                return f"${value:,.2f}"
+        except Exception:
+            return str(value)
 
-    # -------------------------
-    # 티커 변환: 네이버 우선 -> yahooquery 백업
-    # -------------------------
+    def format_market_cap(self, value, ticker: str) -> str:
+        if value is None or value == 0:
+            return "N/A"
+        try:
+            # Korean stock market (원화)
+            if ticker.endswith(".KS") or ticker.endswith(".KQ"):
+                # value expected in KRW
+                # 1조 = 1e12, 1억 = 1e8
+                if value >= 1_000_000_000_000:
+                    return f"₩{value / 1_000_000_000_000:.1f}조"
+                if value >= 100_000_000:
+                    return f"₩{value / 100_000_000:.1f}억"
+                return f"₩{value:,.0f}"
+            else:
+                # USD market
+                if value >= 1_000_000_000_000:
+                    return f"${value / 1_000_000_000_000:.1f}T"
+                if value >= 1_000_000_000:
+                    return f"${value / 1_000_000_000:.1f}B"
+                if value >= 1_000_000:
+                    return f"${value / 1_000_000:.1f}M"
+                return f"${value:,.0f}"
+        except Exception:
+            return str(value)
+
+    def format_percent(self, value) -> str:
+        if value is None:
+            return "N/A"
+        try:
+            return f"{float(value):.2f}%"
+        except Exception:
+            return str(value)
+
+    # ---------- ticker/name resolution ----------
     def get_ticker_by_name(self, query: str) -> Optional[str]:
         """
-        종목명 또는 심볼 입력 시 자동으로 Yahoo Finance 형태의 티커 변환
-        - 네이버 금융 우선(한국 종목), 실패 시 yahooquery로 시도
-        - 반환 예: '005930.KS', 'TSLA', 'AAPL'
+        Accepts company name in Korean/English or ticker.
+        Returns a Yahoo-style ticker (e.g., '005930.KS' or 'AAPL') or None.
+        Priority:
+         1) If input already looks like Yahoo ticker (.KS/.KQ or uppercase symbol) -> return it.
+         2) Naver AC JSON search for Korean names -> returns code + .KS/.KQ
+         3) yahooquery.search backup for international names
+         4) final fallback: try yfinance Ticker info check
         """
         if not query:
             return None
-
         q = query.strip()
 
-        # 이미 Yahoo 형식(대문자 심볼 또는 .KS/.KQ 포함)인 경우 바로 리턴
-        if q.endswith((".KS", ".KQ")):
+        # Already a Yahoo-style ticker?
+        if q.endswith((".KS", ".KQ")) or q.isupper():
             return q.upper()
 
-        # 1) 네이버 금융 검색 시도 (한국 종목 우선)
+        # 1) Naver AC search (works for Korean company names)
         try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/87.0.4280.66 Safari/537.36"
-            }
-            search_url = f"https://ac.stock.naver.com/ac?q={quote(q)}&target=stock"
-            res = requests.get(search_url, headers=headers, timeout=6)
-            if res.status_code != 200:
-                print(f"[네이버 검색 실패] 상태코드: {res.status_code}")
-            else:
-                data = json.loads(res.text)
-                query = data.get("query", "").strip()
+            url = f"https://ac.stock.naver.com/ac?q={quote(q)}&target=stock"
+            headers = {"User-Agent": self.user_agent}
+            res = requests.get(url, headers=headers, timeout=6)
+            if res.status_code == 200 and res.text:
+                data = res.json()
+                # data: { "query": "...", "items": [ {code, name, typeCode, ...}, ... ] }
                 items = data.get("items", [])
-
-                if not items:
-                    return None  # 종목 없음
-
-                # 1. query와 name이 정확히 일치하는 항목 찾기
-                exact_match = next((item for item in items if item.get("name") == query), None)
-
-                # 2. 없다면 첫 번째 item 사용
-                target = exact_match if exact_match else items[0]
-
-                code = target.get("code")
-                type_code = target.get("typeCode")  # KOSPI / KOSDAQ 구분 가능
-                nationName = target.get("nationName")  # 한국/미국 구분
-                if nationName == "미국" :
-                    return None
-
-                # Yahoo Finance 형식 추가 (.KS / .KQ)
-                market = ".KS" if type_code == "KOSPI" else ".KQ"
-                return f"{code}{market}"
-        except Exception as e:
-            # 네이버 검색 실패하면 다음 단계로
-            print(f"[네이버 검색 오류] {e}")
+                search_query = data.get("query", "").strip()
+                if items:
+                    # prefer exact name match if available
+                    exact = next((it for it in items if it.get("name") == search_query), None)
+                    target = exact or items[0]
+                    code = target.get("code")
+                    type_code = target.get("typeCode", "").upper()  # KOSPI/KOSDAQ
+                    nation = target.get("nationName", "")
+                    if code:
+                        market = ".KS" if type_code == "KOSPI" else ".KQ"
+                        # If it's clearly US item, return None to let yahooquery handle
+                        if nation and "미국" in nation:
+                            return None
+                        return f"{code}{market}"
+        except Exception:
+            # ignore and continue to next resolution
             pass
 
-        # 2) yahooquery 검색(영문/국제 종목 매칭) - backup
+        # 2) yahooquery search (backup, good for global/US names)
         try:
             res = yq_search(q)
-            # 결과 형식: dict with 'quotes' list
-            if isinstance(res, dict) and "quotes" in res and len(res["quotes"]) > 0:
-                sym = res["quotes"][0].get("symbol")
-                if sym:
-                    return sym.upper()
+            if isinstance(res, dict) and res.get("quotes"):
+                # return first symbol
+                symbol = res["quotes"][0].get("symbol")
+                if symbol:
+                    return symbol.upper()
         except Exception:
             pass
 
-        # 3) 마지막으로 입력값을 심볼로 시도해보기 (yfinance 유효성 체크)
+        # 3) final fallback: try yfinance ticker validity (fast_info or history)
         try:
             t = yf.Ticker(q.upper())
-            info = getattr(t, "fast_info", None) or getattr(t, "info", None)
-            if info:
+            # fast_info might exist; if not, try info or history
+            fi = getattr(t, "fast_info", None)
+            info = getattr(t, "info", None)
+            if fi or (info and info.get("regularMarketPrice") is not None):
+                return q.upper()
+            # last ditch: if it has history
+            hist = t.history(period="1mo")
+            if hist is not None and len(hist) > 0:
                 return q.upper()
         except Exception:
             pass
 
         return None
 
-    # -------------------------
-    # 메인: 기본정보 + 10년 평균 배당률 + 간단 분석 리턴
-    # -------------------------
+    # ---------- dividend helpers ----------
+    def calc_ttm_dividend_and_yield(self, ticker: str, price_raw: float):
+        """
+        Returns (ttm_dividend_amount, ttm_yield_percent)
+        - ttm_dividend_amount: numeric (in same currency units as price)
+        - ttm_yield_percent: float percentage (e.g., 1.23 for 1.23%)
+        If no dividend data -> (0.0, 0.0)
+        """
+        try:
+            stock = yf.Ticker(ticker)
+            divs = getattr(stock, "dividends", None)
+
+            # 빠른 탈출: 데이터 없음
+            if divs is None or len(divs) == 0:
+                return 0.0, 0.0
+
+            # DataFrame이면 Series로 변환 (일반적으로 yfinance는 Series를 줌)
+            if isinstance(divs, pd.DataFrame):
+                divs = divs.iloc[:, 0]
+
+            # 안전하게 DatetimeIndex로 변환
+            idx = pd.to_datetime(divs.index, errors="coerce")
+            # drop invalid timestamps
+            valid_mask = ~idx.isna()
+            divs = divs.loc[valid_mask]
+            idx = idx[valid_mask]
+
+            if len(idx) == 0:
+                return 0.0, 0.0
+
+            # 만약 index가 tz-aware이면 동일한 tz로 기준 시점 생성
+            tz = idx.tz
+            if tz is not None:
+                # tz-aware 현재 시각
+                now = pd.Timestamp.now(tz=tz)
+                one_year_ago = now - pd.DateOffset(months=12)
+            else:
+                # naive
+                now = pd.Timestamp.now()
+                one_year_ago = now - pd.DateOffset(months=12)
+
+            # index를 비교 가능한 형태로 유지 (tz-aware이면 그대로, naive이면 그대로)
+            # (이미 idx.tz matches one_year_ago.tz above)
+            divs.index = idx
+
+            # 1) pandas convenience: last("12M") 사용 시도 (많은 경우에 동작)
+            ttm_sum = 0.0
+            try:
+                last_12m = divs.loc("12ME")
+                if not last_12m.empty:
+                    ttm_sum = float(last_12m.sum())
+                else:
+                    # fallback to explicit comparison
+                    recent = divs[divs.index >= one_year_ago]
+                    ttm_sum = float(recent.sum()) if not recent.empty else 0.0
+            except Exception:
+                # fallback explicit comparison (handles tz-aware vs naive because one_year_ago was created with matching tz above)
+                recent = divs[divs.index >= one_year_ago]
+                ttm_sum = float(recent.sum()) if not recent.empty else 0.0
+
+            if price_raw and price_raw > 0 and ttm_sum > 0:
+                ttm_yield = (ttm_sum / price_raw) * 100.0
+            else:
+                ttm_yield = 0.0
+
+            return round(ttm_sum, 8), round(ttm_yield, 4)
+
+        except Exception as e:
+            # 개발 중에는 에러 로그 남겨 디버깅에 도움되게
+            print(f"[calc_ttm_dividend_and_yield] {ticker} error: {e}")
+            return 0.0, 0.0
+
+
+
+    # ---------- main info method ----------
     def get_stock_info(self, query: str) -> str:
         """
-        query: 티커(예: 'AAPL' 또는 '005930.KS') 또는 회사명(예: '삼성전자')
-        반환: 텔레그램 전송용 포맷된 텍스트
+        query: ticker (AAPL, 005930.KS) or company name (삼성전자)
+        returns: formatted multi-line string (ready for telegram)
         """
         if not query or not isinstance(query, str):
-            return "❌ 잘못된 입력입니다. /s 뒤에 종목을 입력하세요."
+            return "❌ 잘못된 입력입니다."
 
-        # 1) 티커 확인/변환
+        # 1) resolve ticker if needed
         ticker = query.strip()
-        # 만약 한글/혼합 입력일 가능성 있으면 변환 시도
-        # if not (ticker.endswith((".KS", ".KQ")) or ticker.isupper()):
         resolved = self.get_ticker_by_name(ticker)
-        if  resolved:
+        if resolved:
             ticker = resolved
 
-        # 2) 데이터 로드 (yfinance)
+        # 2) load yfinance info
         try:
             stock = yf.Ticker(ticker)
             info = getattr(stock, "info", {}) or {}
         except Exception as e:
             return f"❌ 데이터 로드 실패: {e}"
 
-        # 필수 확인
-        price = info.get("regularMarketPrice") or info.get("currentPrice")
-        if price is None:
+        # required numeric price
+        price_raw = info.get("regularMarketPrice") or info.get("currentPrice")
+        if price_raw is None:
             return f"⚠️ '{ticker}' 종목의 가격 정보를 불러올 수 없습니다."
 
-        # 3) 주요 지표 추출 (안전하게 가져오기)
+        # safe numeric extraction for change percent
+        change_pct_raw = info.get("regularMarketChangePercent")
+        try:
+            change_pct_val = float(change_pct_raw) if change_pct_raw is not None else None
+        except Exception:
+            change_pct_val = None
+
+        # basic fields
         name = info.get("longName") or info.get("shortName") or ticker
-        change_pct = info.get("regularMarketChangePercent")  # 소수점(%) 형태
-        market_cap = info.get("marketCap") or 0
+        market_cap_raw = info.get("marketCap") or 0
         pe_ratio = info.get("trailingPE")
         eps = info.get("trailingEps")
         pbr = info.get("priceToBook")
-        div_yield = info.get("dividendYield") or 0.0  # 소수(예: 0.02)
         vol = info.get("volume") or None
         high_52 = info.get("fiftyTwoWeekHigh")
         low_52 = info.get("fiftyTwoWeekLow")
@@ -153,33 +255,43 @@ class StockAnalyzer:
         industry = info.get("industry") or "N/A"
         country = info.get("country") or "N/A"
 
-        # 4) 시가총액/배당(10년평균) 계산
-        market_cap_str = self.format_market_cap(market_cap)
+        # 3) dividend calculations
+        ttm_div_amount, ttm_yield_pct = self.calc_ttm_dividend_and_yield(ticker, price_raw)
 
-        # 10년 평균 배당률 계산 (존재하면 %로 반환)
-        avg_div_yield = "N/A"
+        # 4) format for display
+        price_fmt = self.format_price(price_raw, ticker)
+        market_cap_fmt = self.format_market_cap(market_cap_raw, ticker)
+        change_fmt = self.format_percent(change_pct_val) if change_pct_val is not None else "N/A"
+        vol_fmt = f"{int(vol):,}" if vol else "N/A"
+
+        pe_display = f"{pe_ratio:.2f}" if (pe_ratio is not None and pd.notna(pe_ratio)) else "N/A"
+        eps_display = f"{eps:.2f}" if (eps is not None and pd.notna(eps)) else "N/A"
+        pbr_display = f"{pbr:.2f}" if (pbr is not None and pd.notna(pbr)) else "N/A"
+
+        # dividend displays
+        if ttm_div_amount <= 0 or ttm_yield_pct <= 0:
+            dividend_line = "💸 배당률: 배당 없음"
+        else:
+            # show amounts in currency unit consistent with ticker
+            # ttm_div_amount returned in same units as price (KRW or USD)
+            ttm_div_fmt = self.format_price(ttm_div_amount, ticker)
+            dividend_line = f"💸 배당률: 최근 12개월 {ttm_yield_pct:.2f}% ({ttm_div_fmt})"
+
+        # sign
+        sign = "-"
         try:
-            div_hist = getattr(stock, "dividends", None)
-            if isinstance(div_hist, (pd.Series, pd.DataFrame)) and not div_hist.empty:
-                # 연간 배당 합계 & 연평균 수익률 계산
-                div_hist.index = pd.to_datetime(div_hist.index)
-                yearly = div_hist.groupby(div_hist.index.year).sum()
-                # 동일 기간의 평균 주가(연평균) 구하기
-                price_hist = stock.history(period="10y")["Close"]
-                if not price_hist.empty:
-                    price_yearly = price_hist.resample("YE").mean()
-                    merged = pd.concat([yearly, price_yearly], axis=1).dropna()
-                    merged.columns = ["Dividend", "Price"]
-                    if not merged.empty and (merged["Price"] > 0).any():
-                        merged["Yield"] = merged["Dividend"] / merged["Price"]
-                        avg = merged["Yield"].mean()
-                        if pd.notna(avg):
-                            avg_div_yield = round(float(avg) * 100, 2)
+            if change_pct_val is not None:
+                if change_pct_val > 0:
+                    sign = "▲"
+                elif change_pct_val < 0:
+                    sign = "▼"
+                else:
+                    sign = "-"
         except Exception:
-            avg_div_yield = "N/A"
+            sign = "-"
 
-        # 5) 기술적(모멘텀) 간단 계산: 6개월 퍼포먼스
-        momentum_text = "N/A"
+        # 5) momentum (6 months)
+        momentum_text = "데이터 부족"
         try:
             hist6 = stock.history(period="6mo")["Close"]
             if hist6 is not None and len(hist6) > 5:
@@ -193,9 +305,8 @@ class StockAnalyzer:
         except Exception:
             momentum_text = "데이터 부족"
 
-        # 6) 투자의견 (간단한 rules - 적극형 B 스타일)
+        # 6) investment opinion simple rule (B: 적극형)
         opinion_parts = []
-        # PER 기반
         try:
             if pe_ratio and pe_ratio > 0:
                 if pe_ratio < 10:
@@ -209,63 +320,50 @@ class StockAnalyzer:
         except Exception:
             opinion_parts.append("PER 판정 불가")
 
-        # 배당 기반
         try:
-            if avg_div_yield != "N/A":
-                if avg_div_yield > 4:
-                    opinion_parts.append("배당 매력 높음")
-                elif avg_div_yield > 1:
-                    opinion_parts.append("보통 배당")
+            # if ttm exists but 10y N/A, still we can judge ttm
+            if ttm_yield_pct > 0:
+                if ttm_yield_pct > 4:
+                    opinion_parts.append("배당 매력 높음 (최근)")
+                elif ttm_yield_pct > 1:
+                    opinion_parts.append("보통 배당 (최근)")
                 else:
-                    opinion_parts.append("배당 낮음")
+                    opinion_parts.append("배당 낮음 (최근)")
             else:
                 opinion_parts.append("배당 데이터 부족")
         except Exception:
             opinion_parts.append("배당 판정 불가")
 
-        # 모멘텀 기반
         if momentum_text and "강한 상승" in momentum_text:
             opinion_parts.append("단기 모멘텀 양호")
         elif momentum_text and "약세" in momentum_text:
             opinion_parts.append("단기 모멘텀 약함")
 
-        # 종합 간단 등급 도출 (점수 대신 등급)
         score_notes = " / ".join(opinion_parts)
 
-        # 7) 메시지 포맷팅 (텔레그램 전송용)
-        sign = "▲" if (change_pct and change_pct > 0) else "▼" if (change_pct and change_pct < 0) else "-"
-        change_pct_display = f"{abs(change_pct):.2f}" if change_pct is not None else "N/A"
-
-        # 볼륨 표기
-        vol_str = f"{vol:,}" if vol else "N/A"
-
-        pe_display = f"{pe_ratio:.2f}" if (pe_ratio is not None and pd.notna(pe_ratio)) else "N/A"
-        eps_display = f"{eps:.2f}" if (eps is not None and pd.notna(eps)) else "N/A"
-        pbr_display = f"{pbr:.2f}" if (pbr is not None and pd.notna(pbr)) else "N/A"
-        div_display = f"{div_yield * 100:.2f}%" if div_yield else "0.00%"
-
-        avg_div_display = f"{avg_div_yield}%" if avg_div_yield != "N/A" else "N/A"
-
-        msg_lines = [
+        # 7) compose message
+        lines = [
             f"📊 종목 분석: {name} ({ticker})",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-            f"💵 현재가: ${price:,.2f} ({sign}{change_pct_display}%)",
-            f"🏦 시가총액: {market_cap_str}",
+            f"💵 현재가: {price_fmt} ({sign}{change_fmt})",
+            f"🏦 시가총액: {market_cap_fmt}",
             f"📈 PER: {pe_display} | EPS: {eps_display} | PBR: {pbr_display}",
-            f"💸 배당률(최근): {div_display} | 10년 평균: {avg_div_display}",
-            f"🔢 거래량: {vol_str}",
-            f"📅 52주 최고/최저: {high_52} / {low_52}",
+            f"{dividend_line}",
+            f"🔢 거래량: {vol_fmt}",
+            f"📅 52주 최고/최저: {high_52 if high_52 is not None else 'N/A'} / {low_52 if low_52 is not None else 'N/A'}",
             f"🏭 섹터: {sector} | 업종: {industry} | 국가: {country}",
             f"📊 모멘텀: {momentum_text}",
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             f"💬 투자 의견 요약: {score_notes}",
-            "📡 데이터 출처: Yahoo Finance"
+            "📡 데이터 출처: Yahoo Finance / yfinance",
         ]
 
-        return "\n".join(msg_lines)
+        return "\n".join(lines)
 
 
-# Usage example:
-analyzer = StockAnalyzer()
-print(analyzer.get_stock_info("TSLA"))
-print(analyzer.get_stock_info("NAVER"))
+# quick test (only when running this module directly)
+if __name__ == "__main__":
+    analyzer = StockAnalyzer()
+    print(analyzer.get_stock_info("TSLA"))
+    print()
+    print(analyzer.get_stock_info("삼성전자"))
