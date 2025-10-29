@@ -31,7 +31,7 @@ def handle_command(chat_id, text):
     parts = text.split()
     analyzer = StockAnalyzer()
     if text.startswith("/help"):
-        send_message(chat_id, "✅ 주식 분석 봇이 준비되었습니다.\n명령어: /t TSLA 또는 /t 005930.KS(삼성전자)")
+        send_message(chat_id, "✅ 주식 분석 봇 명령어 목록: \n/s TSLA (기본정보검색)\n/b TSLA (백테스팅분석)")
     elif text.startswith("/b"):
         if len(parts) < 2:
             send_message(chat_id, "❗ 사용법: /b TSLA")
@@ -46,8 +46,8 @@ def handle_command(chat_id, text):
             symbol = parts[1].upper()
             analyzer_report = analyzer.get_stock_info(symbol)
             send_message(chat_id, analyzer_report)
-    else:
-        send_message(chat_id, "❗ 알 수 없는 명령입니다.\n/b 또는 /s 명령을 사용하세요.")
+    # else:
+    #     send_message(chat_id, "❗ 알 수 없는 명령입니다.\n/b 또는 /s 명령을 사용하세요.")
 
 
 # 메시지 수신 루프
@@ -73,8 +73,8 @@ def run_bot():
 
                         if chat_id == ALLOWED_CHAT_ID:
                             handle_command(chat_id, text)
-                        else:
-                            send_message(chat_id, "⛔ 권한이 없습니다.")
+                        # else:
+                            # send_message(chat_id, "⛔ 권한이 없습니다.")
 
             time.sleep(1)  # 서버 부하 방지
 
